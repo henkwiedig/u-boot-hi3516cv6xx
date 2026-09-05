@@ -175,6 +175,110 @@ void phy_usb_init(int index)
 	local_irq_restore(flags);
 }
 
+#if defined(CONFIG_USB_GADGET) && defined(CONFIG_USB_DWC3)
+#include <dwc3-uboot.h>
+#include <linux/usb/ch9.h>
+
+/*
+ * Same bring-up as phy_usb_init(), except the final GCTL write selects
+ * PORT_CAP_DIR_DEVICE instead of PORT_CAP_DIR_HOST. Kept as a separate
+ * function rather than parameterizing phy_usb_init() so the existing,
+ * already-proven xhci_hcd_init() host-mode path is untouched.
+ */
+static void phy_usb_init_device(int index)
+{
+	unsigned long flags;
+	unsigned int reg;
+
+	(void)index;
+	local_irq_save(flags);
+
+	if (otp_trim_val == USB_U32_MAX)
+		get_trim_from_otp();
+
+	reg = readl(OTP_USB_MISC) & OTP_VBUS_MASK;
+	if (reg == OTP_VBUS_MASK)
+		writel(VBUS_IN_PULL_UP_DISABLE_VAL, VBUS_IO_REG);
+	else
+		writel(VBUS_IN_PULL_UP_ENABLE_VAL, VBUS_IO_REG);
+
+	writel(USB2_0_PHY_CRG_DEFAULT_VAL, REG_BASE_CRG + USB2_0_PHY_CRG_OFFSET);
+
+	reg = readl(REG_BASE_CRG + USB2_0_PHY_CRG_OFFSET);
+	reg &= ~(USB2_0_PHY_CRG_RST_REQ);
+	writel(reg, REG_BASE_CRG + USB2_0_PHY_CRG_OFFSET);
+
+	reg = readl(USB2_0_PHY_BASE_ADDR + USB2_0_PHY_ANA_CFG5_ADDR_OFFSET);
+	reg |= USB2_0_PHY_PLLCK_VAL;
+	writel(reg, USB2_0_PHY_BASE_ADDR + USB2_0_PHY_ANA_CFG5_ADDR_OFFSET);
+
+	usb_eye_config();
+
+	udelay(U_LEVEL10);
+	reg = readl(REG_BASE_CRG + USB2_0_PHY_CRG_OFFSET);
+	reg &= ~(USB2_0_PHY_CRG_UTMI_RST_REQ);
+	writel(reg, REG_BASE_CRG + USB2_0_PHY_CRG_OFFSET);
+
+	writel(USB2_CRG_DEFAULT_VAL, REG_BASE_CRG + USB2_CRG_CTRL);
+
+	reg = readl(REG_BASE_CRG + USB2_CRG_CTRL);
+	reg &= ~(USB2_CRG_SRST_REQ);
+	writel(reg, REG_BASE_CRG + USB2_CRG_CTRL);
+	udelay(U_LEVEL9);
+
+	/* ctrl init step3. controller DEVICE mode (the only change vs. phy_usb_init) */
+	reg = readl(USB_P0_REG_BASE + REG_GCTL);
+	reg &= ~(PORT_CAP_DIR_MASK);
+	reg |= (PORT_CAP_DIR_DEVICE);   /* [13:12] 01: Host; 10: Device; 11: OTG */
+	writel(reg, USB_P0_REG_BASE + REG_GCTL);
+	local_irq_restore(flags);
+}
+
+static struct dwc3_device hi3516cv610_dwc3_device = {
+	.base = USB_P0_REG_BASE,
+	.dr_mode = USB_DR_MODE_PERIPHERAL,
+	.hsphy_mode = USBPHY_INTERFACE_MODE_UTMI,
+	.maximum_speed = USB_SPEED_HIGH, /* USB2.0 PHY only on this board; no SS PHY init exists */
+	.index = 0,
+};
+
+int board_usb_init(int index, enum usb_init_type init)
+{
+	int ret;
+
+	if (init != USB_INIT_DEVICE)
+		return -1; /* host mode goes through xhci_hcd_init(), unchanged */
+
+	phy_usb_init_device(index);
+	ret = dwc3_uboot_init(&hi3516cv610_dwc3_device);
+	if (ret)
+		return ret;
+
+	/*
+	 * fastboot/DFU only ever connect after a human-typed gap following
+	 * "usb start", so they never exercise a connect() immediately after
+	 * dwc3_uboot_init() returns. ether.c's usb_eth_initialize() does
+	 * connect right away, and hits total EP0 unresponsiveness (-71/-110
+	 * on the host) unless the PHY/link gets a moment to settle first.
+	 */
+	mdelay(200);
+	return 0;
+}
+
+int board_usb_cleanup(int index, enum usb_init_type init)
+{
+	(void)init;
+	dwc3_uboot_exit(index);
+	return 0;
+}
+
+int usb_gadget_handle_interrupts(int index)
+{
+	dwc3_uboot_handle_interrupt(index);
+	return 0;
+}
+#endif /* CONFIG_USB_GADGET && CONFIG_USB_DWC3 */
+
 void xhci_hcd_stop(int index)
 {
 	unsigned int reg;

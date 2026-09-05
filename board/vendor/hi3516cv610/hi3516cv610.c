@@ -9,6 +9,7 @@
 #include <asm/arch/platform.h>
 #include <spi_flash.h>
 #include <nand.h>
+#include <net.h>
 #include <netdev.h>
 #include <mmc.h>
 #include <asm/sections.h>
@@ -445,6 +446,19 @@ int board_eth_init(struct bd_info *bis)
 #ifdef CONFIG_SFV300_ETH
 	rc = bspeth_initialize(bis);
 #endif
+
+#ifdef CONFIG_USB_ETHER
+	/* No on-chip Ethernet is wired on this board; use the USB gadget
+	 * (RNDIS/CDC) as the only network device instead. Registers via the
+	 * legacy eth_register() path (this tree has CONFIG_DM_ETH off), so
+	 * activation goes through board_usb_init() -> dwc3_uboot_init()
+	 * exactly like fastboot/DFU do, the first time a net command runs.
+	 */
+	rc = usb_eth_initialize(bis);
+	if (rc < 0)
+		printf("Error %d registering USB ether.\n", rc);
+#endif
+
 	return rc;
 }
 
